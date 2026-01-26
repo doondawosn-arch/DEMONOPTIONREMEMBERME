@@ -79,7 +79,7 @@ local function RunKeyAuth()
     local currentExecutor, isExecutorSupported = getExecutorInfo()
 
     -- === CONFIGURATION (API ONLY) ===
-    local API_URL = "https://e88bb348-4fd8-48ff-9469-05d98430ecac-00-2cnfwqkk5cebq.kirk.replit.dev/validate"
+    local API_URL = "http://a565681e-6b7e-4a31-9969-417a411be204-00-1aquusjsm7t2q.kirk.replit.dev/validate"
     local ACCENT_COLOR = Color3.fromRGB(255, 145, 40)
     local ACCENT_GLOW = Color3.fromRGB(255, 180, 100)
     local ACCENT_DARK = Color3.fromRGB(200, 100, 20)
