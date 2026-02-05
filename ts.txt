@@ -1,0 +1,1091 @@
+-- NovaOps- Free- Trident Survival- JOIN DC FOR UPDATES!!!
+-- Players ESP + Hitbox + Radar + Ore ESP (Stone / Iron / Nitrate)
+-- FULLY OPTIMIZED VERSION (DRAWING LIB UPDATE + FPS OPTIMIZATIONS + SCROLLABLE UI + FIXED HITBOX + FIXED DRAG + FIXED LOAD ORDER)
+
+-------------------------------------------------
+-- SERVICES (LOCALIZED)
+-------------------------------------------------
+local RunService  = game:GetService("RunService")
+local UIS         = game:GetService("UserInputService")
+local Players     = game:GetService("Players")
+local CoreGui     = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local Workspace   = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+
+-------------------------------------------------
+-- LOCALIZED MATH FUNCTIONS (PERFORMANCE)
+-------------------------------------------------
+local mathClamp   = math.clamp
+local mathFloor   = math.floor
+local mathAbs     = math.abs
+local mathRandom  = math.random
+local mathAtan2   = math.atan2
+local mathSin     = math.sin
+local mathCos     = math.cos
+local mathSqrt    = math.sqrt
+local mathMax     = math.max
+local mathMin     = math.min
+local tick        = tick
+local pairs       = pairs
+local ipairs      = ipairs
+local typeof      = typeof
+local pcall       = pcall
+local spawn       = spawn
+local wait        = wait
+local Vector3_new = Vector3.new
+local Vector2_new = Vector2.new
+local Color3_new  = Color3.new
+local Color3_rgb  = Color3.fromRGB
+
+-------------------------------------------------
+-- CAMERA REFERENCE (UPDATED EACH FRAME)
+-------------------------------------------------
+local Camera = Workspace.CurrentCamera
+
+-------------------------------------------------
+-- ESP FLAGS
+-------------------------------------------------
+local ESP_ENABLED     = true
+local DRAW_BOX        = true      -- 2D Box Master Switch
+local DRAW_3D_BOX     = false     -- 3D Box Switch
+local DRAW_DISTANCE   = true
+local DRAW_HEALTH     = true
+local MAX_DISTANCE    = 1200
+
+-- STYLING
+local BOX_COLOR       = Color3_rgb(255, 145, 40)  -- Orange accent matching main script
+local BOX_FILL_COLOR  = Color3_rgb(0, 0, 0)       -- Black/Dark Gray Fill
+local BOX_TRANSPARENCY= 0.4                       -- Visibility of fill (0-1, 1 is invisible)
+local TEXT_COLOR      = Color3_rgb(255, 255, 255) -- Pure white
+
+-------------------------------------------------
+-- UTILITY FLAGS
+-------------------------------------------------
+local ALERT_ENABLED     = false
+local ALERT_DISTANCE    = 50
+local ALERT_COOLDOWN    = 3
+local lastAlertTime     = 0
+
+-------------------------------------------------
+-- STATE
+-------------------------------------------------
+local drawings          = {}
+local localPlayer       = Players.LocalPlayer
+local unloaded          = false
+
+-------------------------------------------------
+-- PERFORMANCE MODE
+-------------------------------------------------
+local PERFORMANCE_MODE = true
+
+local ESP_INTERVAL_NORMAL           = 1/60
+local ESP_INTERVAL_PERF             = 1/20  -- Increased for better FPS (less frequent updates)
+local RADAR_UPDATE_NORMAL           = 0.15
+local RADAR_UPDATE_PERF             = 0.35
+local PLAYERLIST_UPDATE_NORMAL      = 2.5
+local PLAYERLIST_UPDATE_PERF        = 5
+
+local ESP_UPDATE_INTERVAL           = ESP_INTERVAL_PERF
+local radarUpdateRate               = RADAR_UPDATE_PERF
+local playerListUpdateRate          = PLAYERLIST_UPDATE_PERF
+local espAccum                      = 0
+
+local function applyPerformanceMode()
+    if PERFORMANCE_MODE then
+        ESP_UPDATE_INTERVAL  = ESP_INTERVAL_PERF
+        radarUpdateRate      = RADAR_UPDATE_PERF
+        playerListUpdateRate = PLAYERLIST_UPDATE_PERF
+    else
+        ESP_UPDATE_INTERVAL  = ESP_INTERVAL_NORMAL
+        radarUpdateRate      = RADAR_UPDATE_NORMAL
+        playerListUpdateRate = PLAYERLIST_UPDATE_NORMAL
+    end
+end
+
+-------------------------------------------------
+-- SETTINGS SAVE/LOAD
+-------------------------------------------------
+local SETTINGS_FILE = "TridentSettings_v4.json"
+
+local function saveSettings()
+    local settings = {
+        ESP_ENABLED         = ESP_ENABLED,
+        DRAW_BOX            = DRAW_BOX,
+        DRAW_3D_BOX         = DRAW_3D_BOX,
+        DRAW_DISTANCE       = DRAW_DISTANCE,
+        DRAW_HEALTH         = DRAW_HEALTH,
+        MAX_DISTANCE        = MAX_DISTANCE,
+        ALERT_ENABLED       = ALERT_ENABLED,
+        ALERT_DISTANCE      = ALERT_DISTANCE,
+        PERFORMANCE_MODE    = PERFORMANCE_MODE,
+    }
+    if writefile then
+        pcall(function()
+            writefile(SETTINGS_FILE, HttpService:JSONEncode(settings))
+        end)
+    end
+end
+
+local function loadSettings()
+    if readfile and isfile and isfile(SETTINGS_FILE) then
+        pcall(function()
+            local data = HttpService:JSONDecode(readfile(SETTINGS_FILE))
+            if data.ESP_ENABLED      ~= nil then ESP_ENABLED      = data.ESP_ENABLED      end
+            if data.DRAW_BOX         ~= nil then DRAW_BOX         = data.DRAW_BOX         end
+            if data.DRAW_3D_BOX      ~= nil then DRAW_3D_BOX      = data.DRAW_3D_BOX      end
+            if data.DRAW_DISTANCE    ~= nil then DRAW_DISTANCE    = data.DRAW_DISTANCE    end
+            if data.DRAW_HEALTH      ~= nil then DRAW_HEALTH      = data.DRAW_HEALTH      end
+            if data.MAX_DISTANCE     ~= nil then MAX_DISTANCE     = data.MAX_DISTANCE     end
+            if data.ALERT_ENABLED    ~= nil then ALERT_ENABLED    = data.ALERT_ENABLED    end
+            if data.ALERT_DISTANCE   ~= nil then ALERT_DISTANCE   = data.ALERT_DISTANCE   end
+            if data.PERFORMANCE_MODE ~= nil then PERFORMANCE_MODE = data.PERFORMANCE_MODE end
+        end)
+    end
+end
+
+loadSettings()
+applyPerformanceMode()
+
+-------------------------------------------------
+-- HELPERS
+-------------------------------------------------
+local function getRoot(model)
+    return model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso") or model:FindFirstChild("LowerTorso")
+end
+
+local function isHumanoid(m)
+    if not m:IsA("Model") then return false end
+    local hasRoot = getRoot(m)
+    local hasHead = m:FindFirstChild("Head")
+    return (hasRoot ~= nil) and (hasHead ~= nil)
+end
+
+local function getHealthInfo(model)
+    local hum = model:FindFirstChildWhichIsA("Humanoid")
+    if hum then return hum.Health, hum.MaxHealth end
+    return 100, 100
+end
+
+-------------------------------------------------
+-- HUMANOID MODEL TRACKING
+-------------------------------------------------
+local humanoidModels = {}
+
+local function trackHumanoidModel(model)
+    if model and isHumanoid(model) then
+        humanoidModels[model] = true
+    end
+end
+
+local function untrackHumanoidModel(model)
+    humanoidModels[model] = nil
+    -- Cleanup drawings immediately
+    if drawings[model] then
+        local d = drawings[model]
+        pcall(function()
+            if d.text then d.text:Remove() end
+            if d.boxOutline then d.boxOutline:Remove() end
+            if d.boxFill then d.boxFill:Remove() end
+            if d.healthBar then d.healthBar.bg:Remove() d.healthBar.fill:Remove() end
+            if d.lines3D then
+                for _, l in pairs(d.lines3D) do l:Remove() end
+            end
+        end)
+        drawings[model] = nil
+    end
+end
+
+for _, m in ipairs(Workspace:GetChildren()) do trackHumanoidModel(m) end
+Workspace.ChildAdded:Connect(trackHumanoidModel)
+Workspace.ChildRemoved:Connect(untrackHumanoidModel)
+
+-------------------------------------------------
+-- DRAWING OBJECT CREATION
+-------------------------------------------------
+local function createDrawingObjects(model)
+    local d = {}
+
+    -- 2D Box Elements
+    d.boxOutline = Drawing.new("Square")
+    d.boxOutline.Visible = false
+    d.boxOutline.Color = BOX_COLOR
+    d.boxOutline.Thickness = 1.5
+    d.boxOutline.Filled = false
+
+    d.boxFill = Drawing.new("Square")
+    d.boxFill.Visible = false
+    d.boxFill.Color = BOX_FILL_COLOR
+    d.boxFill.Filled = true
+    d.boxFill.Transparency = BOX_TRANSPARENCY
+
+    -- Text
+    d.text = Drawing.new("Text")
+    d.text.Visible = false
+    d.text.Color = TEXT_COLOR
+    d.text.Size = 13
+    d.text.Center = true
+    d.text.Outline = true
+
+    -- Health Bar
+    d.healthBar = {
+        bg = Drawing.new("Square"),
+        fill = Drawing.new("Square")
+    }
+    d.healthBar.bg.Visible = false
+    d.healthBar.bg.Color = Color3_new(0,0,0)
+    d.healthBar.bg.Filled = true
+    d.healthBar.bg.Transparency = 1 -- fully opaque black bg
+
+    d.healthBar.fill.Visible = false
+    d.healthBar.fill.Color = Color3_rgb(0, 255, 0)
+    d.healthBar.fill.Filled = true
+
+    -- 3D Box Elements (12 Lines)
+    d.lines3D = {}
+    for i=1, 12 do
+        local l = Drawing.new("Line")
+        l.Visible = false
+        l.Color = BOX_COLOR
+        l.Thickness = 1
+        table.insert(d.lines3D, l)
+    end
+
+    drawings[model] = d
+    return d
+end
+
+-------------------------------------------------
+-- 3D BOX MATH
+-------------------------------------------------
+local function getCorners(cf, size)
+    local size2 = size * 0.5
+    local corners = {
+        cf * Vector3_new(-size2.X,  size2.Y, -size2.Z),
+        cf * Vector3_new(-size2.X,  size2.Y,  size2.Z),
+        cf * Vector3_new( size2.X,  size2.Y,  size2.Z),
+        cf * Vector3_new( size2.X,  size2.Y, -size2.Z),
+        cf * Vector3_new(-size2.X, -size2.Y, -size2.Z),
+        cf * Vector3_new(-size2.X, -size2.Y,  size2.Z),
+        cf * Vector3_new( size2.X, -size2.Y,  size2.Z),
+        cf * Vector3_new( size2.X, -size2.Y, -size2.Z),
+    }
+    return corners
+end
+
+-------------------------------------------------
+-- ALERT LOGIC
+-------------------------------------------------
+local function checkAlerts()
+    if not ALERT_ENABLED then return end
+    local now = tick()
+    if now - lastAlertTime < ALERT_COOLDOWN then return end
+
+    local myChar = localPlayer.Character
+    if not myChar then return end
+    local myRoot = getRoot(myChar)
+    if not myRoot then return end
+    local myPos = myRoot.Position
+
+    for model, _ in pairs(humanoidModels) do
+        if model == myChar then continue end
+        local root = getRoot(model)
+        if root then
+            local dist = (myPos - root.Position).Magnitude
+            if dist <= ALERT_DISTANCE then
+                lastAlertTime = now
+                pcall(function()
+                    local sound = Instance.new("Sound", CoreGui)
+                    sound.SoundId = "rbxassetid://6042053626"
+                    sound.Volume = 0.5
+                    sound:Play()
+                    game:GetService("Debris"):AddItem(sound, 2)
+                end)
+                break
+            end
+        end
+    end
+end
+
+-------------------------------------------------
+-- MAIN RENDER LOOP (OPTIMIZED)
+-------------------------------------------------
+RunService.RenderStepped:Connect(function(dt)
+    if unloaded then return end
+    Camera = Workspace.CurrentCamera
+    if not Camera then return end
+
+    checkAlerts()
+
+    espAccum = espAccum + dt
+    if not ESP_ENABLED or espAccum < ESP_UPDATE_INTERVAL then return end  -- Early exit if not time to update
+    espAccum = 0
+
+    local myChar = localPlayer.Character
+
+    for model, _ in pairs(humanoidModels) do
+        local d = drawings[model]
+
+        -- Cleanup check
+        if not model.Parent or (model == myChar) then
+            if d then
+                d.boxOutline.Visible = false
+                d.boxFill.Visible = false
+                d.text.Visible = false
+                d.healthBar.bg.Visible = false
+                d.healthBar.fill.Visible = false
+                for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+            end
+            continue
+        end
+
+        if not d then d = createDrawingObjects(model) end
+
+        local root = getRoot(model)
+        local head = model:FindFirstChild("Head")
+
+        if not root or not head then
+            d.boxOutline.Visible = false
+            d.boxFill.Visible = false
+            d.text.Visible = false
+            d.healthBar.bg.Visible = false
+            d.healthBar.fill.Visible = false
+            for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+            continue
+        end
+
+        local pos, vis = Camera:WorldToViewportPoint(root.Position)
+        local dist = (Camera.CFrame.Position - root.Position).Magnitude
+
+        if not vis or dist > MAX_DISTANCE then
+            d.boxOutline.Visible = false
+            d.boxFill.Visible = false
+            d.text.Visible = false
+            d.healthBar.bg.Visible = false
+            d.healthBar.fill.Visible = false
+            for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+            continue
+        end
+
+        -- MATH FOR 2D BOX
+        local rootPos = root.Position
+        local headPos = head.Position + Vector3_new(0, 0.5, 0)
+        local legPos  = rootPos - Vector3_new(0, 3, 0)
+
+        local topScreen = Camera:WorldToViewportPoint(headPos)
+        local botScreen = Camera:WorldToViewportPoint(legPos)
+
+        local height = mathAbs(topScreen.Y - botScreen.Y)
+        local width = height * 0.6 -- Aspect ratio adjustment
+        local boxPos = Vector2_new(topScreen.X - width/2, topScreen.Y)
+
+        -- 3D BOX LOGIC (OPTIMIZED)
+        if DRAW_3D_BOX then
+            -- Disable 2D Box
+            d.boxOutline.Visible = false
+            d.boxFill.Visible = false
+
+            -- 3D PERFORMANCE OPTIMIZATION
+            -- Skip expensive 3D math for distant targets if Performance Mode is on
+            if PERFORMANCE_MODE and dist > 600 then
+                for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+            else
+                -- Calculate 3D
+                local size = Vector3_new(4, 5.5, 2) -- Character size approx
+                local cf = root.CFrame
+                local corners = getCorners(cf, size)
+                local screenCorners = {}
+                local allVis = true
+
+                for _, c in ipairs(corners) do
+                    local s, v = Camera:WorldToViewportPoint(c)
+                    if not v then allVis = false break end  -- Frustum culling: Skip if off-screen
+                    table.insert(screenCorners, Vector2_new(s.X, s.Y))
+                end
+
+                if allVis and #screenCorners == 8 then
+                    -- Draw Lines
+                    local connections = {
+                        {1,2}, {2,3}, {3,4}, {4,1}, -- Top Face
+                        {5,6}, {6,7}, {7,8}, {8,5}, -- Bottom Face
+                        {1,5}, {2,6}, {3,7}, {4,8}  -- Pillars
+                    }
+                    for i, conn in ipairs(connections) do
+                        local line = d.lines3D[i]
+                        line.From = screenCorners[conn[1]]
+                        line.To = screenCorners[conn[2]]
+                        line.Color = BOX_COLOR
+                        line.Visible = true
+                    end
+                else
+                    for _, l in ipairs(d.lines3D) do l.Visible = false end
+                end
+            end
+
+        -- 2D BOX LOGIC
+        elseif DRAW_BOX then
+            -- Disable 3D
+            for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+
+            -- Draw 2D
+            d.boxOutline.Size = Vector2_new(width, height)
+            d.boxOutline.Position = boxPos
+            d.boxOutline.Color = BOX_COLOR
+            d.boxOutline.Visible = true
+
+            d.boxFill.Size = Vector2_new(width, height)
+            d.boxFill.Position = boxPos
+            d.boxFill.Color = BOX_FILL_COLOR
+            d.boxFill.Transparency = BOX_TRANSPARENCY
+            d.boxFill.Visible = true
+        else
+            -- Disable both
+            d.boxOutline.Visible = false
+            d.boxFill.Visible = false
+            for _, l in ipairs(d.lines3D or {}) do l.Visible = false end
+        end
+
+        -- TEXT (Name/Dist)
+        if DRAW_DISTANCE then
+            d.text.Text = mathFloor(dist) .. "m"
+            d.text.Position = Vector2_new(botScreen.X, botScreen.Y + 4)
+            d.text.Visible = true
+        else
+            d.text.Visible = false
+        end
+
+        -- HEALTH BAR
+        if DRAW_HEALTH then
+            local hp, maxHp = getHealthInfo(model)
+            local pct = mathClamp(hp/maxHp, 0, 1)
+
+            local barH = height
+            local barW = 3
+            local barX = boxPos.X - 6
+            local barY = boxPos.Y
+
+            d.healthBar.bg.Size = Vector2_new(barW, barH)
+            d.healthBar.bg.Position = Vector2_new(barX, barY)
+            d.healthBar.bg.Visible = true
+
+            local fillH = barH * pct
+            d.healthBar.fill.Size = Vector2_new(barW, fillH)
+            d.healthBar.fill.Position = Vector2_new(barX, barY + (barH - fillH))
+            d.healthBar.fill.Color = Color3_rgb(255 * (1-pct), 255 * pct, 0)
+            d.healthBar.fill.Visible = true
+        else
+            d.healthBar.bg.Visible = false
+            d.healthBar.fill.Visible = false
+        end
+    end
+end)
+
+-------------------------------------------------
+-- ORE ESP LOGIC (FIXED TO SHOW ONLY OUTLINES)
+-------------------------------------------------
+local OreSettings = {
+    Enabled = true, ShowStone = true, ShowIron = true, ShowNitrate = true,
+    ShowDistance = false, -- Disabled text labels by default
+    AutoScanNew = true, MinRange = 50, MaxRange = 2000,
+    Range = 1000, UpdateRate = 0.15, ScanChunkSize = 75
+}
+
+local oreGui = Instance.new("ScreenGui", CoreGui)
+oreGui.Name = "TridentOreESP"
+oreGui.ResetOnSpawn = false
+
+local OreColors = {
+    Stone = Color3_rgb(170, 170, 170),
+    Iron = Color3_rgb(255, 255, 120),
+    Nitrate = Color3_rgb(255, 255, 255),
+}
+local OreList = {}
+local OreCounts = {Stone = 0, Iron = 0, Nitrate = 0}
+local oreStatusLabel, oreCounterLabel, oreScanButton
+local oreScanning = false
+local oreScanCoroutine = nil
+
+local function isOreSized(part)
+    local s = part.Size
+    return (s.X > 6.4 and s.X < 8.2) and (s.Y > 5.0 and s.Y < 6.7) and (s.Z > 7.0 and s.Z < 8.7)
+end
+
+local function classifyOre(part)
+    if not part.Size or not isOreSized(part) then return nil end
+    local s = part.Size
+    if mathAbs(s.X - 7.78) < 0.3 then return "Iron" end
+    -- Raycast check for Nitrate vs Stone
+    local ray = RaycastParams.new()
+    ray.FilterType = Enum.RaycastFilterType.Include
+    ray.FilterDescendantsInstances = {part}
+    local res = Workspace:Raycast(part.Position + Vector3_new(0,10,0), Vector3_new(0,-20,0), ray)
+    if res and (res.Material == Enum.Material.Ice or res.Material == Enum.Material.Snow) then
+        return "Nitrate"
+    end
+    return "Stone"
+end
+
+local function updateOreCounter()
+    if oreCounterLabel then
+        oreCounterLabel.Text = string.format("Stone: %d | Iron: %d | Nitrate: %d", OreCounts.Stone, OreCounts.Iron, OreCounts.Nitrate)
+    end
+end
+
+local function ensureOre(part, oreType)
+    if OreList[part] then return end
+    local hl = Instance.new("Highlight", Workspace)
+    hl.Adornee = part
+    hl.FillTransparency = 1  -- Fully transparent fill
+    hl.OutlineColor = OreColors[oreType]
+    hl.OutlineTransparency = 0  -- Fully visible outline
+
+    -- No text label for ore
+    OreList[part] = {Type=oreType, HL=hl}
+    OreCounts[oreType] = OreCounts[oreType] + 1
+    updateOreCounter()
+end
+
+local function removeOre(part)
+    local d = OreList[part]
+    if d then
+        d.HL:Destroy()
+        OreCounts[d.Type] = OreCounts[d.Type] - 1
+        OreList[part] = nil
+        updateOreCounter()
+    end
+end
+
+local function scanWorldAsync()
+    if oreScanning then return end
+    oreScanning = true
+    if oreScanButton then oreScanButton.Text = "Scanning..." end
+    if oreStatusLabel then oreStatusLabel.Text = "Scanning World..." end
+
+    -- Clear
+    for p, _ in pairs(OreList) do removeOre(p) end
+
+    oreScanCoroutine = coroutine.create(function()
+        local all = Workspace:GetDescendants()
+        for i, v in ipairs(all) do
+            if v:IsA("BasePart") then
+                local t = classifyOre(v)
+                if t then ensureOre(v, t) end
+            end
+            if i % 100 == 0 then coroutine.yield() end
+        end
+        oreScanning = false
+        if oreScanButton then oreScanButton.Text = "Scan Ores" end
+        if oreStatusLabel then oreStatusLabel.Text = "Scan Complete" end
+    end)
+end
+
+RunService.Heartbeat:Connect(function()
+    if oreScanning and oreScanCoroutine and coroutine.status(oreScanCoroutine) == "suspended" then
+        coroutine.resume(oreScanCoroutine)
+    end
+end)
+
+local lastOreUpd = 0
+RunService.Heartbeat:Connect(function(dt)
+    lastOreUpd = lastOreUpd + dt
+    if lastOreUpd < OreSettings.UpdateRate then return end
+    lastOreUpd = 0
+    if not OreSettings.Enabled then return end
+
+    local root = getRoot(localPlayer.Character or Instance.new("Model"))
+    if not root then return end
+    local pos = root.Position
+
+    for p, d in pairs(OreList) do
+        if not p.Parent then removeOre(p) continue end
+        local dist = (p.Position - pos).Magnitude
+        local vis = (dist < OreSettings.Range)
+        if d.Type == "Stone" and not OreSettings.ShowStone then vis = false end
+        if d.Type == "Iron" and not OreSettings.ShowIron then vis = false end
+        if d.Type == "Nitrate" and not OreSettings.ShowNitrate then vis = false end
+
+        d.HL.Enabled = vis
+    end
+end)
+
+-------------------------------------------------
+-- HITBOX EXPANDER (HEAD) - OPTIMIZED
+-------------------------------------------------
+local hitboxEnabled        = false
+local hitboxBoost          = 0
+local validCharacters      = {}
+local originalHeadSizes    = {}
+local hitboxConn           = nil
+
+local function isCharacterModel(m)
+    return typeof(m) == "Instance"
+        and m:IsA("Model")
+        and (m:FindFirstChild("Head")
+            or m:FindFirstChild("LowerTorso")
+            or m:FindFirstChild("UpperTorso"))
+end
+
+local function addToValidCharacters(obj)
+    if not isCharacterModel(obj) then return end
+    validCharacters[obj] = true
+
+    local head = obj:FindFirstChild("Head")
+    if head and head:IsA("BasePart") and not originalHeadSizes[head] then
+        originalHeadSizes[head] = head.Size
+    end
+
+    obj.ChildAdded:Connect(function(c)
+        if c.Name == "Head" and c:IsA("BasePart") then
+            if not originalHeadSizes[c] then
+                originalHeadSizes[c] = c.Size
+            end
+        end
+    end)
+end
+
+local function removeFromValidCharacters(obj)
+    validCharacters[obj] = nil
+end
+
+for _, v in ipairs(Workspace:GetChildren()) do
+    addToValidCharacters(v)
+end
+Workspace.ChildAdded:Connect(addToValidCharacters)
+Workspace.ChildRemoved:Connect(removeFromValidCharacters)
+
+local function applyHitboxOnce()
+    for model, _ in pairs(validCharacters) do
+        local head = model and model:FindFirstChild("Head")
+        if head and head:IsA("BasePart") then
+            local orig = originalHeadSizes[head] or head.Size
+            originalHeadSizes[head] = orig
+            local boostVec = Vector3_new(hitboxBoost, hitboxBoost, hitboxBoost * 0.8)
+            head.Size = orig + boostVec
+            head.Transparency = hitboxBoost > 0 and 0.4 or 0
+            head.CanCollide = false
+        end
+    end
+end
+
+local function restoreHitbox()
+    for head, orig in pairs(originalHeadSizes) do
+        if head and head.Parent then
+            head.Size = orig
+            head.Transparency = 0
+        end
+    end
+end
+
+local function setHitboxEnabled(value)
+    hitboxEnabled = value
+
+    if hitboxConn then
+        hitboxConn:Disconnect()
+        hitboxConn = nil
+    end
+
+    if value then
+        hitboxConn = RunService.Heartbeat:Connect(function()
+            applyHitboxOnce()
+        end)
+    else
+        restoreHitbox()
+    end
+end
+
+-------------------------------------------------
+-- UI CONSTRUCTION (DARKER + GRADIENT EFFECT)
+-------------------------------------------------
+pcall(function() CoreGui.TridentUI:Destroy() end)
+
+-- UPDATED COLOR SCHEME TO MATCH MAIN SCRIPT
+local C_DARK    = Color3_rgb(12, 12, 14)      -- Main script background
+local C_MED     = Color3_rgb(18, 18, 22)      -- Main script secondary
+local C_LIGHT   = Color3_rgb(26, 26, 32)      -- Main script surface
+local C_ORANGE  = Color3_rgb(255, 145, 40)    -- Main script accent
+local C_ORANGE2 = Color3_rgb(255, 180, 100)   -- Main script accent glow
+local C_WHITE   = Color3_rgb(255, 255, 255)   -- Pure white
+local C_RED     = Color3_rgb(255, 80, 80)     -- Error red
+
+local gui = Instance.new("ScreenGui", CoreGui)
+gui.Name = "TridentUI"
+gui.ResetOnSpawn = false
+
+local main = Instance.new("Frame", gui)
+main.Size = UDim2.fromOffset(520, 480) 
+main.Position = UDim2.fromScale(0.5, 0.5)
+main.AnchorPoint = Vector2_new(0.5, 0.5)
+main.BackgroundColor3 = C_DARK
+main.Active = true
+main.Draggable = false
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+
+-- GRADIENT BACKGROUND TO MATCH MAIN SCRIPT
+local bgGradient = Instance.new("UIGradient", main)
+bgGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3_rgb(20, 20, 25)),
+    ColorSequenceKeypoint.new(0.5, Color3_rgb(12, 12, 14)),
+    ColorSequenceKeypoint.new(1, Color3_rgb(15, 15, 18))
+})
+bgGradient.Rotation = 45
+
+-- Subtle animated rotation for effect
+spawn(function()
+    while wait(0.05) do
+        if not main.Parent then break end
+        bgGradient.Rotation = (bgGradient.Rotation + 0.5) % 360
+    end
+end)
+
+-- Optional: Add a subtle pattern overlay
+local patternOverlay = Instance.new("Frame", main)
+patternOverlay.Size = UDim2.new(1, 0, 1, 0)
+patternOverlay.BackgroundTransparency = 0.92
+patternOverlay.BackgroundColor3 = Color3_rgb(255, 255, 255)
+patternOverlay.ZIndex = 0
+Instance.new("UICorner", patternOverlay).CornerRadius = UDim.new(0, 8)
+
+local patternGradient = Instance.new("UIGradient", patternOverlay)
+patternGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3_rgb(255, 145, 40)),
+    ColorSequenceKeypoint.new(1, Color3_rgb(200, 100, 20))
+})
+patternGradient.Rotation = 90
+patternGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.95),
+    NumberSequenceKeypoint.new(0.5, 0.98),
+    NumberSequenceKeypoint.new(1, 0.95)
+})
+
+-- CREATE TOP BAR FIRST (FIXED ORDER)
+local topBar = Instance.new("TextLabel", main)
+topBar.Size = UDim2.new(1, 0, 0, 35)
+topBar.BackgroundColor3 = C_ORANGE
+topBar.Text = "NovaOps - Trident Survival"
+topBar.TextColor3 = C_WHITE
+topBar.Font = Enum.Font.GothamBold
+topBar.TextSize = 18
+topBar.ZIndex = 2
+local topBarCorner = Instance.new("UICorner")
+topBarCorner.CornerRadius = UDim.new(0, 8)
+topBarCorner.Parent = topBar
+
+local sidebar = Instance.new("Frame", main)
+sidebar.Size = UDim2.new(0, 120, 1, -35)
+sidebar.Position = UDim2.new(0, 0, 0, 35)
+sidebar.BackgroundColor3 = C_MED
+sidebar.ZIndex = 1
+local sidebarCorner = Instance.new("UICorner")
+sidebarCorner.CornerRadius = UDim.new(0, 8)
+sidebarCorner.Parent = sidebar
+
+local container = Instance.new("Frame", main)
+container.Size = UDim2.new(1, -120, 1, -35)
+container.Position = UDim2.new(0, 120, 0, 35)
+container.BackgroundColor3 = C_DARK
+container.BackgroundTransparency = 1
+container.ZIndex = 1
+
+--// DRAGGABLE LOGIC (NOW DEFINED AFTER TOPBAR)
+local dragging, dragInput, dragStart, startPos
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+topBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+
+topBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then updateDrag(input) end
+end)
+
+--// TAB SYSTEM
+local tabs = {}
+local currentTab = nil
+
+local function switchTab(name)
+    for n, t in pairs(tabs) do
+        if n == name then
+            t.Btn.BackgroundColor3 = C_ORANGE2
+            t.Page.Visible = true
+        else
+            t.Btn.BackgroundColor3 = C_LIGHT
+            t.Page.Visible = false
+        end
+    end
+end
+
+local function addTab(name)
+    local count = 0; for _ in pairs(tabs) do count = count + 1 end
+    local y = count * 38 + 10
+
+    local btn = Instance.new("TextButton", sidebar)
+    btn.Size = UDim2.new(0, 100, 0, 30)
+    btn.Position = UDim2.new(0, 10, 0, y)
+    btn.BackgroundColor3 = C_LIGHT
+    btn.Text = name
+    btn.TextColor3 = C_WHITE
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 15
+    btn.ZIndex = 2
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    local page = Instance.new("ScrollingFrame", container)
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.Visible = false
+    page.ScrollBarThickness = 4
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.ScrollBarImageColor3 = C_ORANGE
+    page.ZIndex = 2
+
+    btn.MouseButton1Click:Connect(function() switchTab(name) end)
+
+    tabs[name] = {Btn = btn, Page = page}
+    return page
+end
+
+local espPage = addTab("ESP")
+local aimPage = addTab("AIM")
+local utilPage = addTab("UTIL")
+
+-------------------------------------------------
+-- UI WIDGETS
+-------------------------------------------------
+local function addToggle(parent, text, get, set)
+    local f = Instance.new("Frame", parent)
+    f.Size = UDim2.new(1, 0, 0, 30)
+    f.BackgroundTransparency = 1
+    f.ZIndex = 2
+
+    local layout = parent:FindFirstChildOfClass("UIListLayout")
+    if not layout then
+        layout = Instance.new("UIListLayout", parent)
+        layout.Padding = UDim.new(0, 6)
+    end
+    
+    if parent:IsA("ScrollingFrame") then
+        parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        end)
+    end
+
+    local btn = Instance.new("TextButton", f)
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundColor3 = get() and C_ORANGE or C_LIGHT
+    btn.Text = text .. ": " .. (get() and "ON" or "OFF")
+    btn.TextColor3 = C_WHITE
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 14
+    btn.ZIndex = 3
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    btn.MouseButton1Click:Connect(function()
+        local nv = not get()
+        set(nv)
+        btn.BackgroundColor3 = nv and C_ORANGE or C_LIGHT
+        btn.Text = text .. ": " .. (nv and "ON" or "OFF")
+        saveSettings()
+    end)
+    return btn
+end
+
+local function addSlider(parent, text, min, max, get, set)
+    local f = Instance.new("Frame", parent)
+    f.Size = UDim2.new(1, 0, 0, 45)
+    f.BackgroundTransparency = 1
+    f.ZIndex = 2
+
+    local layout = parent:FindFirstChildOfClass("UIListLayout")
+    if not layout then
+        layout = Instance.new("UIListLayout", parent)
+        layout.Padding = UDim.new(0, 6)
+    end
+    
+    if parent:IsA("ScrollingFrame") then
+        parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        end)
+    end
+
+    local lbl = Instance.new("TextLabel", f)
+    lbl.Size = UDim2.new(1, 0, 0, 18)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = C_WHITE
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = text .. ": " .. get()
+    lbl.ZIndex = 3
+
+    local bg = Instance.new("Frame", f)
+    bg.Size = UDim2.new(1, 0, 0, 10)
+    bg.Position = UDim2.new(0, 0, 0, 22)
+    bg.BackgroundColor3 = C_LIGHT
+    bg.ZIndex = 3
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 4)
+
+    local fill = Instance.new("Frame", bg)
+    fill.BackgroundColor3 = C_ORANGE
+    fill.Size = UDim2.new((get()-min)/(max-min), 0, 1, 0)
+    fill.ZIndex = 4
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 4)
+
+    local dragging = false
+    bg.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end end)
+    UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false; saveSettings() end end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local alpha = mathClamp((i.Position.X - bg.AbsolutePosition.X)/bg.AbsoluteSize.X, 0, 1)
+            local val = mathFloor(min + alpha*(max-min))
+            set(val)
+            fill.Size = UDim2.new(alpha, 0, 1, 0)
+            lbl.Text = text .. ": " .. val
+        end
+    end)
+end
+
+local function addButton(parent, text, callback, col)
+    local btn = Instance.new("TextButton", parent)
+    btn.Size = UDim2.new(1, 0, 0, 30)
+    btn.BackgroundColor3 = col or C_ORANGE
+    btn.Text = text
+    btn.TextColor3 = C_WHITE
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    btn.ZIndex = 3
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+    btn.MouseButton1Click:Connect(callback)
+
+    local layout = parent:FindFirstChildOfClass("UIListLayout")
+    if not layout then
+        layout = Instance.new("UIListLayout", parent)
+        layout.Padding = UDim.new(0, 6)
+    end
+    
+    if parent:IsA("ScrollingFrame") then
+        parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            parent.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+        end)
+    end
+end
+
+-- POPULATE ESP
+addToggle(espPage, "Master ESP", function() return ESP_ENABLED end, function(v) ESP_ENABLED = v end)
+addToggle(espPage, "2D Corner Box", function() return DRAW_BOX end, function(v) DRAW_BOX = v end)
+addToggle(espPage, "3D Box", function() return DRAW_3D_BOX end, function(v) DRAW_3D_BOX = v end)
+addToggle(espPage, "Distance", function() return DRAW_DISTANCE end, function(v) DRAW_DISTANCE = v end)
+addToggle(espPage, "Health Bar", function() return DRAW_HEALTH end, function(v) DRAW_HEALTH = v end)
+addSlider(espPage, "Max Distance", 100, 2000, function() return MAX_DISTANCE end, function(v) MAX_DISTANCE = v end)
+
+addButton(espPage, "Unload Script", function()
+    unloaded = true
+    ESP_ENABLED = false
+    
+    -- CLEANUP HITBOX EXPANDER
+    hitboxEnabled = false
+    if hitboxConn then
+        hitboxConn:Disconnect()
+        hitboxConn = nil
+    end
+    restoreHitbox()
+    
+    -- CLEANUP DRAWINGS
+    for _, d in pairs(drawings) do
+        d.boxOutline:Remove(); d.boxFill:Remove(); d.text:Remove(); 
+        d.healthBar.bg:Remove(); d.healthBar.fill:Remove()
+        for _, l in ipairs(d.lines3D) do l:Remove() end
+    end
+    table.clear(drawings)
+    
+    -- CLEANUP GUIs
+    oreGui:Destroy()
+    gui:Destroy()
+    
+    print("[NovaOps] Script fully unloaded - all features disabled")
+end, C_RED)
+
+-- POPULATE AIM
+local aimLoaded = false
+local aimBtn
+aimBtn = addToggle(aimPage, "Load Aim Script", function() return aimLoaded end, function(v)
+    if v and not aimLoaded then
+        pcall(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/TootWixx/ROBVLOXAIMSTANDALONE/refs/heads/main/obf_hM3C1Tdkinv4Co61xI2Qbbg5V1acjOJTRO13Skz154CL67l6lpN5IX52xBBIi4Db.lua"))()
+            aimLoaded = true
+        end)
+    end
+end)
+
+-- POPULATE UTIL (AUTO-SCROLLABLE)
+addToggle(utilPage, "Alert Sound", function() return ALERT_ENABLED end, function(v) ALERT_ENABLED = v end)
+addSlider(utilPage, "Alert Dist", 10, 200, function() return ALERT_DISTANCE end, function(v) ALERT_DISTANCE = v end)
+addToggle(utilPage, "Perf Mode", function() return PERFORMANCE_MODE end, function(v) PERFORMANCE_MODE = v; applyPerformanceMode() end)
+
+-- ORE
+local label = Instance.new("TextLabel", utilPage)
+label.Text = "-- ORE SETTINGS --"; label.TextColor3=C_WHITE; label.Size=UDim2.new(1,0,0,25); 
+label.BackgroundTransparency=1; label.ZIndex=2
+local layout = utilPage:FindFirstChildOfClass("UIListLayout")
+label.Parent = utilPage
+if layout then utilPage.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10) end
+
+addToggle(utilPage, "Ore ESP", function() return OreSettings.Enabled end, function(v) OreSettings.Enabled = v end)
+addToggle(utilPage, "Show Stone", function() return OreSettings.ShowStone end, function(v) OreSettings.ShowStone = v end)
+addToggle(utilPage, "Show Iron", function() return OreSettings.ShowIron end, function(v) OreSettings.ShowIron = v end)
+addToggle(utilPage, "Show Nitrate", function() return OreSettings.ShowNitrate end, function(v) OreSettings.ShowNitrate = v end)
+addSlider(utilPage, "Range", 100, 2000, function() return OreSettings.Range end, function(v) OreSettings.Range = v end)
+
+oreScanButton = Instance.new("TextButton", utilPage)
+addButton(utilPage, "Scan Ores", function() scanWorldAsync() end, C_ORANGE)
+oreStatusLabel = Instance.new("TextLabel", utilPage)
+oreStatusLabel.Size = UDim2.new(1,0,0,25); oreStatusLabel.BackgroundTransparency=1; 
+oreStatusLabel.TextColor3=C_WHITE; oreStatusLabel.Text="Ready."; oreStatusLabel.ZIndex=2
+oreCounterLabel = Instance.new("TextLabel", utilPage)
+oreCounterLabel.Size = UDim2.new(1,0,0,25); oreCounterLabel.BackgroundTransparency=1; 
+oreCounterLabel.TextColor3=C_WHITE; oreCounterLabel.Text="None."; oreCounterLabel.ZIndex=2
+
+-- HITBOX
+local hbl = Instance.new("TextLabel", utilPage)
+hbl.Text = "-- HITBOX --"; hbl.TextColor3=C_WHITE; hbl.Size=UDim2.new(1,0,0,25); 
+hbl.BackgroundTransparency=1; hbl.ZIndex=2
+hbl.Parent = utilPage
+
+addToggle(utilPage, "Expand Head", function() return hitboxEnabled end, function(v)
+    hitboxEnabled = v
+    if not v then restoreHitbox() end
+    setHitboxEnabled(v)
+end)
+addSlider(utilPage, "Size Boost", 1, 10, function() return hitboxBoost end, function(v)
+    hitboxBoost = v
+    if hitboxEnabled then applyHitboxOnce() end
+end)
+
+-- Initial Tab
+switchTab("ESP")
+
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.Insert then
+        main.Visible = not main.Visible
+    end
+end)
+
+print("[NovaOps] Trident v5.5 - Fixed Load Order + Larger UI Loaded")
